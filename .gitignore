@@ -10,3 +10,5 @@ wheels/
 .venv
 *.log
 router*
+*.npy
+i2t_results/

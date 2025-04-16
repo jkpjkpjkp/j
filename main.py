@@ -3,7 +3,7 @@ from PIL import Image
 import scipy
 import numpy as np
 import hashlib
-import openai
+from openai import OpenAI
 from io import BytesIO
 import base64
 import json
@@ -19,18 +19,25 @@ def depth_estimator(image):
             image.save(temp_file.name)
             image_path = temp_file.name
         try:
-            result = client.predict(
-                    input_image=handle_file(image_path),
+            result_path = client.predict(
+                    image=handle_file(image_path),
                     api_name="/predict"
             )
         finally:
             os.remove(image_path)  # Clean up the temporary file
     else: # Assume it's already a path or URL if not a PIL Image
-         result = client.predict(
-                    input_image=handle_file(image),
+         result_path = client.predict(
+                    image=handle_file(image),
                     api_name="/predict"
             )
-    return result
+
+    # Load the result image (depth map) and convert to numpy array
+    depth_image = Image.open(result_path).convert('L') # Convert to grayscale
+    depth_array = np.array(depth_image)
+    # Optionally clean up the result file if it's temporary and no longer needed
+    # os.remove(result_path) # Be careful if the path is needed elsewhere
+
+    return depth_array
 
 def sam2(image):
     client = Client("http://localhost:7861/")
@@ -50,21 +57,39 @@ def sam2(image):
                 input_image=handle_file(image),
                 api_name="/predict"
         )
-    return result
+    return np.array([np.array(Image.open(x['image'])) for x in result])
 
 def i2t(image):
-    print(type(image))
     if isinstance(image, bytes):
         image = Image.open(BytesIO(image))
     image = image.convert('RGB')
 
-    masks = sam2(image)
-    depth = depth_estimator(image)
+    # depth = depth_estimator(image)
+    # masks = sam2(image)
+
+    # np.save('/data/depth.npy', depth)
+    # np.save('/data/masks.npy', masks)
+    
+    depth = np.load('/data/depth.npy', allow_pickle=True)
+    masks = np.load('/data/masks.npy', allow_pickle=True)
+    
+    masks = masks[:, :, :, 0]
+    print(depth)
+    print(masks[0])
+    print(depth.shape)
+    print(masks.shape)
     
     three_d = [
         [(x, y, depth[x, y]) for x, y in np.argwhere(mask)]
         for mask in masks
     ]
+
+    for i, x in enumerate(three_d):
+        if len(x) > 200:
+            # Randomly select 200 indices
+            indices = np.random.choice(len(x), 200, replace=False)
+            # Use the indices to select the points
+            three_d[i] = [x[idx] for idx in indices]
 
     hulls = list(map(scipy.spatial.ConvexHull, three_d))
     n = len(hulls)
@@ -84,7 +109,6 @@ def i2t(image):
     
 
     
-    
 
     _volume = {}
     def volume(subtree):
@@ -96,17 +120,19 @@ def i2t(image):
         _volume[hs] = ret
         return ret
 
-    def dfs(node, vis):
+    def dfs(node, vis, fulltree):
         ret = []
         vis[node] = True
         subtree = [node]
         for i, connected in enumerate(mst[node]):
-            if connected and not vis[i]:
-                tree, trees = dfs(i, vis)
+            if connected and i in fulltree and not vis[i]:
+                tree, trees = dfs(i, vis, fulltree)
                 subtree.extend(tree)
                 ret.extend(trees)
-        ret.append(subtree)
-        ret.append([x for x in range(n) if x not in subtree])
+        rsubtree = [x for x in fulltree if x not in subtree]
+        if subtree and rsubtree:
+            ret.append(subtree)
+            ret.append(rsubtree)
         return subtree, ret
 
     def recurse(subtree):
@@ -117,12 +143,13 @@ def i2t(image):
             volumn_x, _ = volume([x])
             if volumn_x >= volumn_whole - 1e-4:
                 return (subtree, [x], recurse([y for y in subtree if y != x]))
-        
-        _, subtrees = dfs(subtree[0], [x not in subtree for x in range(n)])
+        _, subtrees = dfs(subtree[0], [x not in subtree for x in range(n)], subtree)
         min_sum = float('inf')
         win_subtrees = None
         win_hulls = None
         for i in range(0, len(subtrees), 2):
+            assert all(x in subtrees[i] or x in subtrees[i + 1] for x in subtree)
+            assert not any(x in subtrees[i] and x in subtrees[i + 1] for x in subtree)
             v1, h1 = volume(subtrees[i])
             v2, h2 = volume(subtrees[i + 1])
             if v1 + v2 < min_sum:
@@ -133,16 +160,16 @@ def i2t(image):
         center1 = np.average(win_hulls[0], axis=0)
         center2 = np.average(win_hulls[1], axis=0)
         dir = center2 - center1
+        assert win_subtrees[0]
+        assert win_subtrees[1]
+        assert all(x in win_subtrees[0] or x in win_subtrees[1] for x in subtree)
+        assert not any(x in win_subtrees[0] and x in win_subtrees[1] for x in subtree)
         return (subtree, recurse(win_subtrees[0]), recurse(win_subtrees[1]), dir)
     
     parsed = recurse(list(range(n)))
 
-    def bbox(mask):
-        arg = np.argwhere(mask)
-        return [arg[:, 0].min(), arg[:, 1].min(), arg[:, 0].max(), arg[:, 1].max()]
-
     def merged_mask(subtree):
-        mask = np.zeros((image.width, image.height), dtype=np.uint8)
+        mask = np.zeros((image.height, image.width), dtype=np.uint8)
         for i in subtree:
             mask |= masks[i]
         return mask
@@ -153,14 +180,7 @@ def i2t(image):
             return caption
         return {'caption': caption, 'child1': construct(semantic_tree[1]), 'child2': construct(semantic_tree[2]), 'vector': semantic_tree[3]}
     
-    import os
-    import datetime
-    dirname = f'i2t_results'
-    os.makedirs(dirname, exist_ok=True)
-    with open(f'{dirname}/{hashlib.md5(str(image).encode()).hexdigest()}.json', 'w') as f:
-        json.dump(parsed, f)
-    for i, mask in enumerate(masks):
-        mask.save(f'{dirname}/mask_{i}.png')
+    
     return construct(parsed)
 
 def extract_brace(x: str):
@@ -177,11 +197,18 @@ def test_extract_brace():
     assert extract_brace(r'hello {world} {hello}') == 'world'
     assert extract_brace(r'hello') == None
 
+def _bbox(mask):
+    arg = np.argwhere(mask)
+    return [arg[:, 0].min(), arg[:, 1].min(), arg[:, 0].max(), arg[:, 1].max()]
+
+client1 = OpenAI(base_url="http://localhost:7912", api_key="sk-local")
 def mask_caption(image, mask):
     masked = image.copy()
-    masked.putalpha(mask * 255)
+    # Convert numpy mask to PIL Image for alpha channel
+    alpha_mask = Image.fromarray(mask * 255, mode='L')
+    masked.putalpha(alpha_mask)
 
-    bbox = bbox(mask)
+    bbox = _bbox(mask)
     center = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
     width = (bbox[2] - bbox[0]) / 2
     height = (bbox[3] - bbox[1]) / 2
@@ -189,19 +216,24 @@ def mask_caption(image, mask):
     cropping_cascade = []
     while True:
         bbox = [max(0, center[0] - width), max(0, center[1] - height), min(image.width, center[0] + width), min(image.height, center[1] + height)]
-        cropping_cascade.append(image.crop(bbox).thumbnail((min(7 * width, 512), min(7 * height, 512))))
+        cropped_img = image.crop(bbox)
+        cropped_img.thumbnail((min(7 * width, 512), min(7 * height, 512)))
+        cropping_cascade.append(cropped_img)
         if bbox == [0, 0, image.width, image.height]:
             break
         width *= 2
         height *= 2
+    print(cropping_cascade)
 
     def image_to_base64(image):
         buffered = BytesIO()
         image.save(buffered, format='PNG')
         return f'data:image/png;base64,{base64.b64encode(buffered.getvalue()).decode()}'
     
-    response = openai.chat.completions.create(
-        model='gpt-4o-mini',
+    response = client1.chat.completions.create(
+        model='qwen',
+        api_key='sk-local',
+        base_url='http://localhost:7912',
         messages=[
             {'role': 'system', 'content': 'You are a helpful assistant that captions masks.'},
             {'role': 'user', 'content': [{'type': 'text', 'text': (
@@ -214,10 +246,11 @@ def mask_caption(image, mask):
 
     return extract_brace(response) or response
     
-    
+
+client2 = OpenAI(base_url="https://api.deepseek.com", api_key="sk-1f5e4b715d244fdaa68952be343ba4bd")
 def vqa(image, question):
     semantic_tree = i2t(image)
-    return openai.chat.completions.create(
+    return client2.chat.completions.create(
         model='deepseek-reasoner',
         messages=[
             {'role': 'system', 'content': 'You are a agent that can understand image based on its semantic tree, and answer vqa questions.'},
