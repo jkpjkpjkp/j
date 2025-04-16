@@ -232,8 +232,6 @@ def mask_caption(image, mask):
     
     response = client1.chat.completions.create(
         model='qwen',
-        api_key='sk-local',
-        base_url='http://localhost:7912',
         messages=[
             {'role': 'system', 'content': 'You are a helpful assistant that captions masks.'},
             {'role': 'user', 'content': [{'type': 'text', 'text': (
