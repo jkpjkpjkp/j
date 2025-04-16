@@ -179,9 +179,19 @@ def i2t(image):
         return {'caption': caption, 'child1': construct(semantic_tree[1]), 'child2': construct(semantic_tree[2]), 'vector': list(semantic_tree[3].astype(int))}
     
     
+    class NpEncoder(json.JSONEncoder):
+        def default(self, obj):
+            if isinstance(obj, np.integer):
+                return int(obj)
+            if isinstance(obj, np.floating):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return super(NpEncoder, self).default(obj)
+    
     cool = construct(parsed)
     with open('cool.json', 'w') as f:
-        json.dump(cool, f)
+        json.dump(cool, f, cls=NpEncoder)
     return cool
 
 def extract_brace(x: str):
