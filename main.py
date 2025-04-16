@@ -7,8 +7,9 @@ import openai
 from io import BytesIO
 import base64
 import re
-def i2t(image_path: str):
-    image = Image.open(image_path)
+import json
+
+def i2t(image):
     image = image.convert('RGB')
 
     masks = sam2postprocess(sam2.automatic_mask_generator.generate(image))
@@ -42,9 +43,12 @@ def i2t(image_path: str):
     _volume = {}
     def volume(subtree):
         hs = _hash(subtree)
-        if hs not in _volume:
-            _volume[hs] = scipy.spatial.ConvexHull(np.concatenate([hulls[i].points for i in subtree])).volume
-        return _volume[hs]
+        if hs in _volume:
+            return _volume[hs]
+        hull = scipy.spatial.ConvexHull(np.concatenate([hulls[i].points for i in subtree]))
+        ret = hull.volume, hull.points
+        _volume[hs] = ret
+        return ret
 
     def dfs(node, vis):
         ret = []
@@ -62,24 +66,34 @@ def i2t(image_path: str):
     def recurse(subtree):
         if len(subtree) == 1:
             return subtree
-        volumn_whole = volume(subtree)
+        volumn_whole, _ = volume(subtree)
         for x in subtree:
-            if volume([x]) >= volumn_whole - 1e-4:
+            volumn_x, _ = volume([x])
+            if volumn_x >= volumn_whole - 1e-4:
                 return (subtree, [x], recurse([y for y in subtree if y != x]))
         
         _, subtrees = dfs(subtree[0], [x not in subtree for x in range(n)])
         min_sum = float('inf')
         win_subtrees = None
+        win_hulls = None
         for i in range(0, len(subtrees), 2):
-            left = recurse(subtrees[i])
-            right = recurse(subtrees[i + 1])
-            v_sum = volume(left) + volume(right)
-            if v_sum < min_sum:
-                min_sum = v_sum
-                win_subtrees = (left, right)
-        return (subtree, recurse(win_subtrees[0]), recurse(win_subtrees[1]))
+            v1, h1 = volume(subtrees[i])
+            v2, h2 = volume(subtrees[i + 1])
+            if v1 + v2 < min_sum:
+                min_sum = v1 + v2
+                win_subtrees = (subtrees[i], subtrees[i + 1])
+                win_hulls = (h1, h2)
+        
+        center1 = np.average(win_hulls[0], axis=0)
+        center2 = np.average(win_hulls[1], axis=0)
+        dir = center2 - center1
+        return (subtree, recurse(win_subtrees[0]), recurse(win_subtrees[1]), dir)
     
     parsed = recurse(list(range(n)))
+
+    def bbox(mask):
+        arg = np.argwhere(mask)
+        return [arg[:, 0].min(), arg[:, 1].min(), arg[:, 0].max(), arg[:, 1].max()]
 
     def merged_mask(subtree):
         mask = np.zeros((image.width, image.height), dtype=np.uint8)
@@ -87,11 +101,20 @@ def i2t(image_path: str):
             mask |= masks[i]
         return mask
     
+    def construct(semantic_tree):
+        caption = mask_caption(image, merged_mask(semantic_tree[0]))
+        if len(semantic_tree) == 1:
+            return caption
+        return {'caption': caption, 'child1': construct(semantic_tree[1]), 'child2': construct(semantic_tree[2]), 'vector': semantic_tree[3]}
     
-def mask_caption(image, mask, bbox):
+    return construct(parsed)
+
+
+def mask_caption(image, mask):
     masked = image.copy()
     masked.putalpha(mask * 255)
 
+    bbox = bbox(mask)
     center = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
     width = (bbox[2] - bbox[0]) / 2
     height = (bbox[3] - bbox[1]) / 2
@@ -125,5 +148,27 @@ def mask_caption(image, mask, bbox):
     return re.search(r'{.*}', response).group(0) or response
     
     
+def vqa(image, question):
+    semantic_tree = i2t(image)
+    return openai.chat.completions.create(
+        model='deepseek-reasoner',
+        messages=[
+            {'role': 'system', 'content': 'You are a agent that can understand image based on its semantic tree, and answer vqa questions.'},
+            {'role': 'user', 'content': f'''
+this is the semantic tree of an image. 
+each subtree has a caption, two children, and a 3d vector pointing from centers of child1 to child2, to give you a understanding of the spatial relationship between the two children.
+subtree caption is a caption of the whole subtree, so it may duplicate the caption of its children.
+{json.dumps(semantic_tree)}
 
+now, answer the question based on the semantic tree.
+question: {question}
+'''}
+        ]
+    ).choices[0].message.content
 
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--image', type=str, required=True)
+    parser.add_argument('--question', type=str, required=True)
+    args = parser.parse_args()
+    print(vqa(args.image, args.question))
