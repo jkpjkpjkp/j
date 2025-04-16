@@ -7,14 +7,59 @@ import openai
 from io import BytesIO
 import base64
 import json
+from gradio_client import Client, handle_file
+import tempfile
+import os
+
+
+def depth_estimator(image):
+    client = Client("http://localhost:7860/")
+    if isinstance(image, Image.Image):
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
+            image.save(temp_file.name)
+            image_path = temp_file.name
+        try:
+            result = client.predict(
+                    input_image=handle_file(image_path),
+                    api_name="/predict"
+            )
+        finally:
+            os.remove(image_path)  # Clean up the temporary file
+    else: # Assume it's already a path or URL if not a PIL Image
+         result = client.predict(
+                    input_image=handle_file(image),
+                    api_name="/predict"
+            )
+    return result
+
+def sam2(image):
+    client = Client("http://localhost:7861/")
+    if isinstance(image, Image.Image):
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
+            image.save(temp_file.name)
+            image_path = temp_file.name
+        try:
+            result = client.predict(
+                    input_image=handle_file(image_path),
+                    api_name="/predict"
+            )
+        finally:
+            os.remove(image_path) # Clean up the temporary file
+    else: # Assume it's already a path or URL if not a PIL Image
+        result = client.predict(
+                input_image=handle_file(image),
+                api_name="/predict"
+        )
+    return result
 
 def i2t(image):
+    print(type(image))
     if isinstance(image, bytes):
         image = Image.open(BytesIO(image))
     image = image.convert('RGB')
 
-    masks = sam2postprocess(sam2.automatic_mask_generator.generate(image))
-    depth = depth_estimator.predict(image)
+    masks = sam2(image)
+    depth = depth_estimator(image)
     
     three_d = [
         [(x, y, depth[x, y]) for x, y in np.argwhere(mask)]
@@ -108,6 +153,14 @@ def i2t(image):
             return caption
         return {'caption': caption, 'child1': construct(semantic_tree[1]), 'child2': construct(semantic_tree[2]), 'vector': semantic_tree[3]}
     
+    import os
+    import datetime
+    dirname = f'i2t_results'
+    os.makedirs(dirname, exist_ok=True)
+    with open(f'{dirname}/{hashlib.md5(str(image).encode()).hexdigest()}.json', 'w') as f:
+        json.dump(parsed, f)
+    for i, mask in enumerate(masks):
+        mask.save(f'{dirname}/mask_{i}.png')
     return construct(parsed)
 
 def extract_brace(x: str):

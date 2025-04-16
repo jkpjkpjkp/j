@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "gradio-client>=1.8.0",
     "loguru>=0.7.3",
     "openai>=1.74.0",
     "pillow>=11.2.1",
