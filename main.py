@@ -70,14 +70,10 @@ def i2t(image):
     # np.save('/data/depth.npy', depth)
     # np.save('/data/masks.npy', masks)
     
-    depth = np.load('/data/depth.npy', allow_pickle=True)
-    masks = np.load('/data/masks.npy', allow_pickle=True)
+    depth = np.load('/mnt/data/depth.npy', allow_pickle=True)
+    masks = np.load('/mnt/data/masks.npy', allow_pickle=True)
     
     masks = masks[:, :, :, 0]
-    print(depth)
-    print(masks[0])
-    print(depth.shape)
-    print(masks.shape)
     
     three_d = [
         [(x, y, depth[x, y]) for x, y in np.argwhere(mask)]
@@ -169,6 +165,8 @@ def i2t(image):
     parsed = recurse(list(range(n)))
 
     def merged_mask(subtree):
+        if isinstance(subtree, int):
+            return masks[subtree]
         mask = np.zeros((image.height, image.width), dtype=np.uint8)
         for i in subtree:
             mask |= masks[i]
@@ -178,10 +176,13 @@ def i2t(image):
         caption = mask_caption(image, merged_mask(semantic_tree[0]))
         if len(semantic_tree) == 1:
             return caption
-        return {'caption': caption, 'child1': construct(semantic_tree[1]), 'child2': construct(semantic_tree[2]), 'vector': semantic_tree[3]}
+        return {'caption': caption, 'child1': construct(semantic_tree[1]), 'child2': construct(semantic_tree[2]), 'vector': list(semantic_tree[3].astype(int))}
     
     
-    return construct(parsed)
+    cool = construct(parsed)
+    with open('cool.json', 'w') as f:
+        json.dump(cool, f)
+    return cool
 
 def extract_brace(x: str):
     import re
@@ -199,6 +200,7 @@ def test_extract_brace():
 
 def _bbox(mask):
     arg = np.argwhere(mask)
+    print(arg)
     return [arg[:, 0].min(), arg[:, 1].min(), arg[:, 0].max(), arg[:, 1].max()]
 
 client1 = OpenAI(base_url="http://localhost:7912", api_key="sk-local")
@@ -209,27 +211,29 @@ def mask_caption(image, mask):
     masked.putalpha(alpha_mask)
 
     bbox = _bbox(mask)
-    center = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
-    width = (bbox[2] - bbox[0]) / 2
-    height = (bbox[3] - bbox[1]) / 2
+    print(bbox)
+    center = (bbox[0] + bbox[2]) // 2, (bbox[1] + bbox[3]) // 2
+    width = (bbox[2] - bbox[0]) // 2
+    height = (bbox[3] - bbox[1]) // 2
 
     cropping_cascade = []
-    while True:
-        bbox = [max(0, center[0] - width), max(0, center[1] - height), min(image.width, center[0] + width), min(image.height, center[1] + height)]
+    for _ in range(4):
+        bbox = [max(0, center[0] - width), max(0, center[1] - height), min(image.height, center[0] + width), min(image.width, center[1] + height)]
+        print(bbox)
         cropped_img = image.crop(bbox)
-        cropped_img.thumbnail((min(7 * width, 512), min(7 * height, 512)))
+        cropped_img.thumbnail((512, 512)) # Keep aspect ratio, fit within 512x512
         cropping_cascade.append(cropped_img)
-        if bbox == [0, 0, image.width, image.height]:
+        if bbox == [0, 0, image.height, image.width]:
             break
         width *= 2
         height *= 2
-    print(cropping_cascade)
 
     def image_to_base64(image):
         buffered = BytesIO()
         image.save(buffered, format='PNG')
         return f'data:image/png;base64,{base64.b64encode(buffered.getvalue()).decode()}'
     
+
     response = client1.chat.completions.create(
         model='qwen',
         messages=[
