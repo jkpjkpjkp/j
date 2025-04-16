@@ -6,10 +6,11 @@ import hashlib
 import openai
 from io import BytesIO
 import base64
-import re
 import json
 
 def i2t(image):
+    if isinstance(image, bytes):
+        image = Image.open(BytesIO(image))
     image = image.convert('RGB')
 
     masks = sam2postprocess(sam2.automatic_mask_generator.generate(image))
@@ -109,6 +110,19 @@ def i2t(image):
     
     return construct(parsed)
 
+def extract_brace(x: str):
+    import re
+    match = re.search(r"{(.*?)}", x)
+    if not match:
+        return None
+    return match.group(1)
+
+def test_extract_brace():
+    assert extract_brace(r'{hello}') == 'hello'
+    assert extract_brace(r'{hello} world') == 'hello'
+    assert extract_brace(r'hello {world}') == 'world'
+    assert extract_brace(r'hello {world} {hello}') == 'world'
+    assert extract_brace(r'hello') == None
 
 def mask_caption(image, mask):
     masked = image.copy()
@@ -145,7 +159,7 @@ def mask_caption(image, mask):
         ]
     ).choices[0].message.content
 
-    return re.search(r'{.*}', response).group(0) or response
+    return extract_brace(response) or response
     
     
 def vqa(image, question):
@@ -154,15 +168,18 @@ def vqa(image, question):
         model='deepseek-reasoner',
         messages=[
             {'role': 'system', 'content': 'You are a agent that can understand image based on its semantic tree, and answer vqa questions.'},
-            {'role': 'user', 'content': f'''
+            {'role': 'user', 'content': (f'''
 this is the semantic tree of an image. 
-each subtree has a caption, two children, and a 3d vector pointing from centers of child1 to child2, to give you a understanding of the spatial relationship between the two children.
+each subtree represent a part of the image, and its 2 children subparts of it, forming a hierarchical understanding of the image. 
+each subtree has a caption, two children, and a 3d vector pointing from center of child1 to center of child2, to give you an understanding of the spatial relationship between the two.
 subtree caption is a caption of the whole subtree, so it may duplicate the caption of its children.
 {json.dumps(semantic_tree)}
 
 now, answer the question based on the semantic tree.
-question: {question}
-'''}
+question: {question})
+'''
+r'put your final answer in curly braces like {your_answer}.')
+}
         ]
     ).choices[0].message.content
 
