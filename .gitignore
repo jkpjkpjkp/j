@@ -11,5 +11,5 @@ wheels/
 *.log
 router*
 *.npy
-i2t_results/
+i2t_results*
 *.json

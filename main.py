@@ -81,9 +81,9 @@ def i2t(image):
     ]
 
     for i, x in enumerate(three_d):
-        if len(x) > 200:
+        if len(x) > 2000:
             # Randomly select 200 indices
-            indices = np.random.choice(len(x), 200, replace=False)
+            indices = np.random.choice(len(x), 2000, replace=False)
             # Use the indices to select the points
             three_d[i] = [x[idx] for idx in indices]
 
@@ -130,6 +130,16 @@ def i2t(image):
             ret.append(subtree)
             ret.append(rsubtree)
         return subtree, ret
+    
+    def loss_sum(x, y):
+        return x + y
+    
+    def loss_sum_sqia(x, y):
+        return x ** 2 + y ** 2
+    def loss_sum_tia(x, y):
+        return x ** 3 + y ** 3
+
+    lossf = loss_sum_tia
 
     def recurse(subtree):
         if len(subtree) == 1:
@@ -148,8 +158,9 @@ def i2t(image):
             assert not any(x in subtrees[i] and x in subtrees[i + 1] for x in subtree)
             v1, h1 = volume(subtrees[i])
             v2, h2 = volume(subtrees[i + 1])
-            if v1 + v2 < min_sum:
-                min_sum = v1 + v2
+            loss = lossf(v1, v2)
+            if loss < min_sum:
+                min_sum = loss
                 win_subtrees = (subtrees[i], subtrees[i + 1])
                 win_hulls = (h1, h2)
         
@@ -163,6 +174,9 @@ def i2t(image):
         return (subtree, recurse(win_subtrees[0]), recurse(win_subtrees[1]), dir)
     
     parsed = recurse(list(range(n)))
+    from render import render_parsed
+    render_parsed(parsed, masks, 'i2t_results')
+    # exit()
 
     def merged_mask(subtree):
         if isinstance(subtree, int):
@@ -178,7 +192,7 @@ def i2t(image):
             return caption
         return {'caption': caption, 'child1': construct(semantic_tree[1]), 'child2': construct(semantic_tree[2]), 'vector': list(semantic_tree[3].astype(int))}
     
-    
+
     class NpEncoder(json.JSONEncoder):
         def default(self, obj):
             if isinstance(obj, np.integer):
@@ -190,8 +204,11 @@ def i2t(image):
             return super(NpEncoder, self).default(obj)
     
     cool = construct(parsed)
-    with open('cool.json', 'w') as f:
-        json.dump(cool, f, cls=NpEncoder)
+    try:
+        with open('cool.json', 'w') as f:
+            json.dump(cool, f, cls=NpEncoder)
+    except Exception as e:
+        print(e)
     return cool
 
 def extract_brace(x: str):
